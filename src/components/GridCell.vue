@@ -17,7 +17,7 @@ const label = computed(() => {
     case 'empty': return ''
     case 'cross': return '×'
     case 'tick': return '✓'
-    case 'note': return String(props.state.n)
+    case 'note': return props.state.ns.join(',')
   }
 })
 
@@ -28,6 +28,14 @@ const colorClass = computed(() => {
     case 'tick': return 'text-emerald-500'
     case 'note': return 'text-sky-400'
   }
+})
+
+const noteSize = computed(() => {
+  if (props.state.kind !== 'note') return 'text-base'
+  const len = props.state.ns.join(',').length
+  if (len <= 2) return 'text-base'
+  if (len <= 4) return 'text-xs'
+  return 'text-[10px]'
 })
 
 const pressTimer = ref<number | null>(null)
@@ -63,8 +71,8 @@ function onClick() {
 <template>
   <button
     type="button"
-    class="w-9 h-9 flex items-center justify-center text-base font-bold select-none rounded-md border border-slate-700 bg-slate-800/40 active:bg-slate-700 touch-none"
-    :class="colorClass"
+    class="w-9 h-9 flex items-center justify-center font-bold select-none rounded-md border border-slate-700 bg-slate-800/40 active:bg-slate-700 touch-none"
+    :class="[colorClass, noteSize]"
     @pointerdown="startPress"
     @pointerup="endPress"
     @pointerleave="endPress"

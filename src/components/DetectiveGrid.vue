@@ -4,7 +4,6 @@ import { useGameStore } from '../stores/game'
 import { byCategory } from '../logic/cards'
 import GridCell from './GridCell.vue'
 import NumberPad from './NumberPad.vue'
-import type { CellState } from '../logic/types'
 
 const store = useGameStore()
 const state = computed(() => store.state)
@@ -36,6 +35,12 @@ function initials(name: string): string {
   return (parts[0][0] + parts[1][0]).toUpperCase()
 }
 
+function isRowSolved(cardId: string): boolean {
+  const row = state.value.grid[cardId]
+  if (!row) return false
+  return playerIds.value.every((pid) => row[pid].kind === 'cross')
+}
+
 // Long-press → number pad
 const pad = ref<{ cardId: string; playerId: string; x: number; y: number } | null>(null)
 
@@ -43,15 +48,29 @@ function onLongPress(cardId: string, playerId: string, coords: { x: number; y: n
   pad.value = { cardId, playerId, x: coords.x, y: coords.y }
 }
 
+const padCellNs = computed<number[]>(() => {
+  if (!pad.value) return []
+  const c = state.value.grid[pad.value.cardId][pad.value.playerId]
+  return c.kind === 'note' ? c.ns : []
+})
+
 function pickNumber(n: number) {
   if (!pad.value) return
-  const st: CellState = { kind: 'note', n }
-  store.setCellState(pad.value.cardId, pad.value.playerId, st)
+  const cur = state.value.grid[pad.value.cardId][pad.value.playerId]
+  let ns: number[]
+  if (cur.kind === 'note') {
+    ns = cur.ns.includes(n) ? cur.ns.filter((x) => x !== n) : [...cur.ns, n].sort((a, b) => a - b)
+  } else {
+    ns = [n]
+  }
+  if (ns.length === 0) {
+    store.setCellState(pad.value.cardId, pad.value.playerId, { kind: 'empty' })
+  } else {
+    store.setCellState(pad.value.cardId, pad.value.playerId, { kind: 'note', ns })
+  }
   if (n >= store.state.nextGroupNumber) {
-    // bump so future auto-assigned groups don't collide with manual ones
     store.state.nextGroupNumber = n + 1
   }
-  pad.value = null
 }
 
 function clearCell() {
@@ -104,7 +123,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             </td>
           </tr>
           <tr v-for="card in grouped[cat]" :key="card.id">
-            <td class="sticky left-0 z-10 bg-slate-900 px-2 py-1 text-slate-200 whitespace-nowrap border-t border-slate-800">
+            <td
+              class="sticky left-0 z-10 bg-slate-900 px-2 py-1 whitespace-nowrap border-t border-slate-800"
+              :class="isRowSolved(card.id) ? 'text-slate-100 font-bold underline decoration-emerald-500 decoration-2 underline-offset-2' : 'text-slate-200'"
+            >
               {{ card.name }}
             </td>
             <td v-for="pid in playerIds" :key="pid" class="text-center border-t border-slate-800">
@@ -132,6 +154,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       :x="pad.x"
       :y="pad.y"
       :max="9"
+      :active="padCellNs"
       @pick="pickNumber"
       @clear="clearCell"
       @close="closePad"

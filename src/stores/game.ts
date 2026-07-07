@@ -125,7 +125,7 @@ export const useGameStore = defineStore('game', () => {
     const cur = next.grid[cardId][playerId]
     const newSt = cycleCell(cur, next.nextGroupNumber)
     next.grid = setCell(next, cardId, playerId, newSt)
-    if (newSt.kind === 'note') next.nextGroupNumber = Math.max(next.nextGroupNumber, newSt.n + 1)
+    if (newSt.kind === 'note') next.nextGroupNumber = Math.max(next.nextGroupNumber, ...newSt.ns, 0) + 1
     commit(next)
   }
 
@@ -199,7 +199,8 @@ export const useGameStore = defineStore('game', () => {
   }
 
   function resetAll(): void {
-    snapshot()
+    past.value = []
+    future.value = []
     state.value = freshState()
     persist()
   }

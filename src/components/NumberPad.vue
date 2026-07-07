@@ -5,6 +5,7 @@ const props = defineProps<{
   x: number
   y: number
   max: number
+  active: number[]
 }>()
 
 const emit = defineEmits<{
@@ -34,7 +35,8 @@ const style = computed(() => {
       <button
         v-for="n in nums.slice(0, max)" :key="n"
         type="button"
-        class="w-11 h-11 rounded-lg bg-slate-700 text-slate-100 font-bold text-sm active:bg-sky-600"
+        class="w-11 h-11 rounded-lg font-bold text-sm"
+        :class="active.includes(n) ? 'bg-sky-600 text-white' : 'bg-slate-700 text-slate-100 active:bg-sky-600'"
         @click="emit('pick', n)"
       >{{ n }}</button>
     </div>

@@ -16,7 +16,13 @@ export function makeGrid(cards: Card[], playerIds: string[]): Grid {
 export function cloneGrid(g: Grid): Grid {
   const out: Grid = {}
   for (const k of Object.keys(g)) {
-    out[k] = { ...g[k] }
+    const row = g[k]
+    const newRow: PlayerGrid = {}
+    for (const pid of Object.keys(row)) {
+      const c = row[pid]
+      newRow[pid] = c.kind === 'note' ? { kind: 'note', ns: [...c.ns] } : c
+    }
+    out[k] = newRow
   }
   return out
 }
@@ -38,9 +44,38 @@ const isTick = (c: CellState) => c.kind === 'tick'
 
 function set(grid: Grid, cardId: string, playerId: string, st: CellState): boolean {
   const cur = grid[cardId][playerId]
-  if (cur.kind === st.kind && (st.kind !== 'note' || (cur.kind === 'note' && cur.n === st.n))) return false
+  if (cur.kind === st.kind) {
+    if (st.kind === 'note' && cur.kind === 'note') {
+      if (sameNumbers(cur.ns, st.ns)) return false
+    } else {
+      return false
+    }
+  }
   grid[cardId][playerId] = st
   return true
+}
+
+function sameNumbers(a: number[], b: number[]): boolean {
+  if (a.length !== b.length) return false
+  const sa = [...a].sort((x, y) => x - y)
+  const sb = [...b].sort((x, y) => x - y)
+  return sa.every((v, i) => v === sb[i])
+}
+
+/** Merge a group number into an existing note cell (or create a new note). */
+function mergeNote(grid: Grid, cardId: string, playerId: string, n: number): boolean {
+  const cur = grid[cardId][playerId]
+  if (cur.kind === 'note') {
+    if (cur.ns.includes(n)) return false
+    cur.ns = [...cur.ns, n].sort((a, b) => a - b)
+    return true
+  }
+  if (cur.kind === 'empty') {
+    grid[cardId][playerId] = { kind: 'note', ns: [n] }
+    return true
+  }
+  // cross or tick — don't add notes
+  return false
 }
 
 /** A tick on (player, card) means that card is unique → X for all other players. */
@@ -68,17 +103,22 @@ function propagateCardUniqueness(grid: Grid, cards: Card[], players: string[]): 
   return changed
 }
 
-/** If a player's note cells for a suggestion have 2 X's, the shown card is the 3rd → tick. */
+/** If a player's note cells for a suggestion group have 2 X's, the shown card is the 3rd → tick. */
 function resolveNotes(grid: Grid, playerIds: string[]): boolean {
   let changed = false
-  for (const cardId of Object.keys(grid)) {
-    for (const p of playerIds) {
-      const cell = grid[cardId][p]
-      if (cell.kind !== 'note') continue
-      // collect all cardIds sharing the same note number for this player
-      const group = Object.keys(grid).filter((cid) => {
+  const allCardIds = Object.keys(grid)
+  for (const p of playerIds) {
+    // collect all group numbers this player has notes for
+    const groupNumbers = new Set<number>()
+    for (const cid of allCardIds) {
+      const c = grid[cid][p]
+      if (c.kind === 'note') for (const n of c.ns) groupNumbers.add(n)
+    }
+    for (const n of groupNumbers) {
+      // all cardIds that carry group n for this player
+      const group = allCardIds.filter((cid) => {
         const c = grid[cid][p]
-        return c.kind === 'note' && c.n === cell.n
+        return c.kind === 'note' && c.ns.includes(n)
       })
       // Only resolve multi-card groups — a lone note is a manual marker, not a deduction.
       if (group.length < 2) continue
@@ -123,15 +163,15 @@ export function applyTurn(state: GameState, askerId: string, suggestion: Suggest
   // Asker: by asking, they don't have any of these cards themselves? Not necessarily — they may
   // hold one and still ask. We cannot deduce anything about the asker from the question alone.
 
-  // Passers: they do NOT have any of the three cards.
+  // Passers: they do NOT have any of the three cards. Skipped players are ignored entirely.
   for (const r of responses) {
-    if (r.passed) {
+    if (r.passed && !r.skipped) {
       for (const cid of suggestionCardIds) set(grid, cid, r.responderId, { kind: 'cross' })
     }
   }
 
-  // First shower: they hold at least one of the three.
-  const shower = responses.find((r) => !r.passed)
+  // First (non-skipped) shower: they hold at least one of the three.
+  const shower = responses.find((r) => !r.passed && !r.skipped)
   let groupNumber: number | null = null
   if (shower) {
     // If the shower revealed a specific card (e.g. "me" entered it), tick it directly.
@@ -147,9 +187,9 @@ export function applyTurn(state: GameState, askerId: string, suggestion: Suggest
         // Only one possible card → they hold it.
         set(grid, nonX[0], shower.responderId, { kind: 'tick' })
       } else if (nonX.length >= 2) {
-        // Unknown which one — assign a group number to all three non-X cells.
+        // Unknown which one — assign a group number to all non-X cells, merging with existing notes.
         groupNumber = state.nextGroupNumber
-        for (const cid of nonX) set(grid, cid, shower.responderId, { kind: 'note', n: groupNumber })
+        for (const cid of nonX) mergeNote(grid, cid, shower.responderId, groupNumber)
       }
     }
   }
@@ -197,7 +237,7 @@ export function cycleCell(cur: CellState, n = 1): CellState {
   switch (cur.kind) {
     case 'empty': return { kind: 'cross' }
     case 'cross': return { kind: 'tick' }
-    case 'tick': return { kind: 'note', n }
+    case 'tick': return { kind: 'note', ns: [n] }
     case 'note': return { kind: 'empty' }
   }
 }

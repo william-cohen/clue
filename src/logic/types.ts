@@ -10,7 +10,7 @@ export type CellState =
   | { kind: 'empty' }
   | { kind: 'cross' }
   | { kind: 'tick' }
-  | { kind: 'note', n: number }
+  | { kind: 'note', ns: number[] }
 
 export type Grid = Record<string, Record<string, CellState>>
 export type PlayerGrid = Record<string, CellState>
@@ -39,6 +39,8 @@ export interface Response {
   passed: boolean
   /** When the responder is "me" and revealed a specific card, its id is recorded here. */
   shownCardId?: string | null
+  /** When the responder was skipped (absent), no deduction is made for them. */
+  skipped?: boolean
 }
 
 export interface Turn {

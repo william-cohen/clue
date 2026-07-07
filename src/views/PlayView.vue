@@ -53,7 +53,7 @@ const cardName = computed(() => {
             <div class="text-xs text-slate-400 mt-1">
               <span v-for="r in t.responses" :key="r.responderId" class="mr-2">
                 {{ playerById[r.responderId] }}:
-                {{ r.passed ? 'pass' : (r.shownCardId ? `show ${cardName[r.shownCardId]}` : 'show') }}
+                {{ r.skipped ? 'skip' : (r.passed ? 'pass' : (r.shownCardId ? `show ${cardName[r.shownCardId]}` : 'show')) }}
               </span>
               <span v-if="t.groupNumber !== null" class="text-sky-400">→ group #{{ t.groupNumber }}</span>
             </div>

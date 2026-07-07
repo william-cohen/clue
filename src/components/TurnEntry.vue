@@ -38,7 +38,7 @@ const responders = computed(() => {
   return out
 })
 
-const responses = ref<Record<string, 'pending' | 'pass' | 'show'>>({})
+const responses = ref<Record<string, 'pending' | 'pass' | 'show' | 'skip'>>({})
 // When "me" is the shower — the specific card I revealed.
 const shownCardName = ref<Record<string, string | null>>({})
 // When "me" is the asker — the card I saw from the shower.
@@ -63,7 +63,7 @@ function resetForm() {
   seenCardName.value = null
 }
 
-function setResponse(id: string, v: 'pass' | 'show') {
+function setResponse(id: string, v: 'pass' | 'show' | 'skip') {
   responses.value[id] = v
   if (v === 'show') {
     // lock later responders as not asked.
@@ -74,7 +74,7 @@ function setResponse(id: string, v: 'pass' | 'show') {
         responses.value[laterId] = 'pending'
       }
     }
-  } else if (v === 'pass') {
+  } else if (v === 'pass' || v === 'skip') {
     // clearing a show also clears any recorded shown card
     delete shownCardName.value[id]
   }
@@ -159,7 +159,11 @@ function submit() {
   for (const pid of order) {
     const s = responses.value[pid] ?? 'pending'
     if (s === 'pending') break
-    const r: Response = { responderId: pid, passed: s === 'pass' }
+    const r: Response = {
+      responderId: pid,
+      passed: s === 'pass',
+      skipped: s === 'skip'
+    }
     if (s === 'show') {
       // If "me" is the shower, record the card I revealed.
       if (playerById.value[pid].isMe && shownCardName.value[pid]) {
@@ -240,6 +244,12 @@ function meLabel(r: { isMe: boolean }): string {
                 :class="r.status === 'show' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'"
                 @click="setResponse(r.id, 'show')"
               >Show</button>
+              <button
+                type="button"
+                class="px-3 py-1 rounded-md text-xs font-semibold"
+                :class="r.status === 'skip' ? 'bg-amber-600 text-white' : 'bg-slate-700 text-slate-300'"
+                @click="setResponse(r.id, 'skip')"
+              >Skip</button>
             </div>
             <span v-else class="text-xs text-slate-500">—</span>
           </div>
