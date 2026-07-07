@@ -37,6 +37,8 @@ export interface Suggestion {
 export interface Response {
   responderId: string
   passed: boolean
+  /** When the responder is "me" and revealed a specific card, its id is recorded here. */
+  shownCardId?: string | null
 }
 
 export interface Turn {

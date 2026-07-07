@@ -80,6 +80,8 @@ function resolveNotes(grid: Grid, playerIds: string[]): boolean {
         const c = grid[cid][p]
         return c.kind === 'note' && c.n === cell.n
       })
+      // Only resolve multi-card groups — a lone note is a manual marker, not a deduction.
+      if (group.length < 2) continue
       const xCount = group.filter((cid) => isX(grid[cid][p])).length
       const nonX = group.filter((cid) => !isX(grid[cid][p]) && grid[cid][p].kind !== 'tick')
       // If only one non-X (and non-tick) cell remains in the group, promote it to tick.
@@ -132,20 +134,23 @@ export function applyTurn(state: GameState, askerId: string, suggestion: Suggest
   const shower = responses.find((r) => !r.passed)
   let groupNumber: number | null = null
   if (shower) {
-    // If all three are already X for the shower → contradiction; ignore gracefully.
-    // If exactly one is already tick for the shower → they hold that one (no new info; treat as tick already).
-    const nonX = suggestionCardIds.filter((cid) => !isX(grid[cid][shower.responderId]))
-    const alreadyTick = suggestionCardIds.filter((cid) => isTick(grid[cid][shower.responderId]))
+    // If the shower revealed a specific card (e.g. "me" entered it), tick it directly.
+    if (shower.shownCardId && suggestionCardIds.includes(shower.shownCardId)) {
+      set(grid, shower.shownCardId, shower.responderId, { kind: 'tick' })
+    } else {
+      const nonX = suggestionCardIds.filter((cid) => !isX(grid[cid][shower.responderId]))
+      const alreadyTick = suggestionCardIds.filter((cid) => isTick(grid[cid][shower.responderId]))
 
-    if (alreadyTick.length >= 1) {
-      // They already hold a known card among the three; showing tells us nothing new.
-    } else if (nonX.length === 1) {
-      // Only one possible card → they hold it.
-      set(grid, nonX[0], shower.responderId, { kind: 'tick' })
-    } else if (nonX.length >= 2) {
-      // Unknown which one — assign a group number to all three non-X cells.
-      groupNumber = state.nextGroupNumber
-      for (const cid of nonX) set(grid, cid, shower.responderId, { kind: 'note', n: groupNumber })
+      if (alreadyTick.length >= 1) {
+        // They already hold a known card among the three; showing tells us nothing new.
+      } else if (nonX.length === 1) {
+        // Only one possible card → they hold it.
+        set(grid, nonX[0], shower.responderId, { kind: 'tick' })
+      } else if (nonX.length >= 2) {
+        // Unknown which one — assign a group number to all three non-X cells.
+        groupNumber = state.nextGroupNumber
+        for (const cid of nonX) set(grid, cid, shower.responderId, { kind: 'note', n: groupNumber })
+      }
     }
   }
 

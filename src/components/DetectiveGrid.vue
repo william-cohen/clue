@@ -1,8 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue'
 import { useGameStore } from '../stores/game'
 import { byCategory } from '../logic/cards'
 import GridCell from './GridCell.vue'
+import NumberPad from './NumberPad.vue'
+import type { CellState } from '../logic/types'
 
 const store = useGameStore()
 const state = computed(() => store.state)
@@ -33,6 +35,41 @@ function initials(name: string): string {
   if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase()
   return (parts[0][0] + parts[1][0]).toUpperCase()
 }
+
+// Long-press → number pad
+const pad = ref<{ cardId: string; playerId: string; x: number; y: number } | null>(null)
+
+function onLongPress(cardId: string, playerId: string, coords: { x: number; y: number }) {
+  pad.value = { cardId, playerId, x: coords.x, y: coords.y }
+}
+
+function pickNumber(n: number) {
+  if (!pad.value) return
+  const st: CellState = { kind: 'note', n }
+  store.setCellState(pad.value.cardId, pad.value.playerId, st)
+  if (n >= store.state.nextGroupNumber) {
+    // bump so future auto-assigned groups don't collide with manual ones
+    store.state.nextGroupNumber = n + 1
+  }
+  pad.value = null
+}
+
+function clearCell() {
+  if (!pad.value) return
+  store.setCellState(pad.value.cardId, pad.value.playerId, { kind: 'empty' })
+  pad.value = null
+}
+
+function closePad() {
+  pad.value = null
+}
+
+// close on outside interaction / escape
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') closePad()
+}
+onMounted(() => window.addEventListener('keydown', onKey))
+onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
 
 <template>
@@ -75,11 +112,29 @@ function initials(name: string): string {
                 :state="state.grid[card.id][pid]"
                 :me="playerById[pid].isMe"
                 @tap="tapCell(card.id, pid)"
+                @longpress="onLongPress(card.id, pid, $event)"
               />
             </td>
           </tr>
         </template>
       </tbody>
     </table>
+
+    <!-- backdrop to catch outside taps -->
+    <div
+      v-if="pad"
+      class="fixed inset-0 z-40"
+      @pointerdown="closePad"
+      @click="closePad"
+    />
+    <NumberPad
+      v-if="pad"
+      :x="pad.x"
+      :y="pad.y"
+      :max="9"
+      @pick="pickNumber"
+      @clear="clearCell"
+      @close="closePad"
+    />
   </div>
 </template>

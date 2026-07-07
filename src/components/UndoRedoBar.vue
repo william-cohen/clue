@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { useGameStore } from '../stores/game'
 const store = useGameStore()
+
+function reset() {
+  if (confirm('Reset everything? This clears the current game and returns to setup. Undo can bring it back.')) {
+    store.resetAll()
+  }
+}
 </script>
 
 <template>
@@ -17,6 +23,10 @@ const store = useGameStore()
       :disabled="!store.canRedo"
       @click="store.redo()"
     >↷ Redo</button>
-    <span class="ml-auto text-xs text-slate-500">{{ store.canUndo ? 'history' : '' }}</span>
+    <button
+      type="button"
+      class="ml-auto px-3 py-2 rounded-lg bg-rose-600/80 text-white text-sm font-medium"
+      @click="reset"
+    >Reset</button>
   </div>
 </template>

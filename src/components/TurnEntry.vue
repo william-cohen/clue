@@ -39,12 +39,28 @@ const responders = computed(() => {
 })
 
 const responses = ref<Record<string, 'pending' | 'pass' | 'show'>>({})
+// When "me" is the shower — the specific card I revealed.
+const shownCardName = ref<Record<string, string | null>>({})
+// When "me" is the asker — the card I saw from the shower.
+const seenCardName = ref<string | null>(null)
+
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+
+const suggestedCardNames = computed(() => {
+  const names: string[] = []
+  if (suspectName.value) names.push(suspectName.value)
+  if (weaponName.value) names.push(weaponName.value)
+  if (roomName.value) names.push(roomName.value)
+  return names
+})
 
 function resetForm() {
   suspectName.value = null
   weaponName.value = null
   roomName.value = null
   responses.value = {}
+  shownCardName.value = {}
+  seenCardName.value = null
 }
 
 function setResponse(id: string, v: 'pass' | 'show') {
@@ -58,6 +74,9 @@ function setResponse(id: string, v: 'pass' | 'show') {
         responses.value[laterId] = 'pending'
       }
     }
+  } else if (v === 'pass') {
+    // clearing a show also clears any recorded shown card
+    delete shownCardName.value[id]
   }
 }
 
@@ -89,6 +108,11 @@ const firstShower = computed<string | null>(() => {
 })
 void firstShower
 
+const askerIsMe = computed(() => {
+  const a = state.value.players.find((p) => p.id === askerId.value)
+  return a?.isMe ?? false
+})
+
 const allReachedResolved = computed(() => {
   const order = responders.value.map((r) => r.id)
   let resolved = false
@@ -116,7 +140,14 @@ const canSubmitStrict = computed(() => {
       if (sawShow) break
       return false
     }
-    if (s === 'show') { sawShow = true; break }
+    if (s === 'show') {
+      // If the shower is "me", require a chosen card.
+      if (playerById.value[pid].isMe && !shownCardName.value[pid]) return false
+      // If the asker is "me", require the card I saw from the shower.
+      if (askerIsMe.value && !seenCardName.value) return false
+      sawShow = true
+      break
+    }
   }
   return true
 })
@@ -128,10 +159,20 @@ function submit() {
   for (const pid of order) {
     const s = responses.value[pid] ?? 'pending'
     if (s === 'pending') break
-    rs.push({ responderId: pid, passed: s === 'pass' })
+    const r: Response = { responderId: pid, passed: s === 'pass' }
+    if (s === 'show') {
+      // If "me" is the shower, record the card I revealed.
+      if (playerById.value[pid].isMe && shownCardName.value[pid]) {
+        r.shownCardId = slug(shownCardName.value[pid]!)
+      }
+      // If "me" is the asker, record the card I saw.
+      if (askerIsMe.value && seenCardName.value) {
+        r.shownCardId = slug(seenCardName.value)
+      }
+    }
+    rs.push(r)
     if (s === 'show') break
   }
-  const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
   const sugg: Suggestion = {
     suspect: slug(suspectName.value!),
     weapon: slug(weaponName.value!),
@@ -181,26 +222,66 @@ function meLabel(r: { isMe: boolean }): string {
         <div
           v-for="r in responderStatus"
           :key="r.id"
-          class="flex items-center justify-between gap-2 rounded-lg bg-slate-800/40 px-3 py-2"
+          class="rounded-lg bg-slate-800/40 px-3 py-2"
           :class="{ 'opacity-40': !r.reached }"
         >
-          <span class="text-sm">{{ r.name }}{{ meLabel(r) }}</span>
-          <div class="flex gap-1" v-if="r.reached">
-            <button
-              type="button"
-              class="px-3 py-1 rounded-md text-xs font-semibold"
-              :class="r.status === 'pass' ? 'bg-rose-600 text-white' : 'bg-slate-700 text-slate-300'"
-              @click="setResponse(r.id, 'pass')"
-            >Nothing</button>
-            <button
-              type="button"
-              class="px-3 py-1 rounded-md text-xs font-semibold"
-              :class="r.status === 'show' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'"
-              @click="setResponse(r.id, 'show')"
-            >Show</button>
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-sm">{{ r.name }}{{ meLabel(r) }}</span>
+            <div class="flex gap-1" v-if="r.reached">
+              <button
+                type="button"
+                class="px-3 py-1 rounded-md text-xs font-semibold"
+                :class="r.status === 'pass' ? 'bg-rose-600 text-white' : 'bg-slate-700 text-slate-300'"
+                @click="setResponse(r.id, 'pass')"
+              >Nothing</button>
+              <button
+                type="button"
+                class="px-3 py-1 rounded-md text-xs font-semibold"
+                :class="r.status === 'show' ? 'bg-emerald-600 text-white' : 'bg-slate-700 text-slate-300'"
+                @click="setResponse(r.id, 'show')"
+              >Show</button>
+            </div>
+            <span v-else class="text-xs text-slate-500">—</span>
           </div>
-          <span v-else class="text-xs text-slate-500">—</span>
+          <div
+            v-if="r.reached && r.status === 'show' && r.isMe"
+            class="mt-2 pt-2 border-t border-slate-700"
+          >
+            <label class="text-[10px] uppercase text-slate-400 block mb-1">Card I showed</label>
+            <div class="flex flex-wrap gap-1.5">
+              <button
+                v-for="name in suggestedCardNames"
+                :key="name"
+                type="button"
+                class="px-2.5 py-1 rounded-full border text-xs"
+                :class="(shownCardName[r.id] ?? null) === name
+                  ? 'bg-emerald-600 border-emerald-500 text-white'
+                  : 'bg-slate-900 border-slate-700 text-slate-300'"
+                @click="shownCardName[r.id] = (shownCardName[r.id] === name ? null : name)"
+              >{{ name }}</button>
+            </div>
+          </div>
         </div>
+      </div>
+    </section>
+
+    <section
+      v-if="askerIsMe && firstShower"
+      class="space-y-2 rounded-lg bg-emerald-900/20 border border-emerald-700/40 p-3"
+    >
+      <label class="text-xs uppercase text-emerald-300">Card I saw</label>
+      <p class="text-xs text-slate-400">{{ playerById[firstShower].name }} showed me a card — which one?</p>
+      <div class="flex flex-wrap gap-1.5">
+        <button
+          v-for="name in suggestedCardNames"
+          :key="name"
+          type="button"
+          class="px-2.5 py-1 rounded-full border text-xs"
+          :class="seenCardName === name
+            ? 'bg-emerald-600 border-emerald-500 text-white'
+            : 'bg-slate-900 border-slate-700 text-slate-300'"
+          @click="seenCardName = (seenCardName === name ? null : name)"
+        >{{ name }}</button>
       </div>
     </section>
 
