@@ -3,10 +3,11 @@ import { ref, computed } from 'vue'
 import { useGameStore } from '../stores/game'
 import DetectiveGrid from '../components/DetectiveGrid.vue'
 import TurnEntry from '../components/TurnEntry.vue'
+import SuggestView from '../components/SuggestView.vue'
 import UndoRedoBar from '../components/UndoRedoBar.vue'
 
 const store = useGameStore()
-const tab = ref<'grid' | 'turn' | 'log'>('turn')
+const tab = ref<'turn' | 'grid' | 'log' | 'suggest'>('turn')
 
 const turns = computed(() => store.state.turns)
 const playerById = computed(() => {
@@ -27,17 +28,18 @@ const cardName = computed(() => {
     <nav class="sticky top-0 z-30 bg-slate-900/95 backdrop-blur border-b border-slate-800">
       <div class="flex max-w-md mx-auto">
         <button
-          v-for="t in (['turn','grid','log'] as const)" :key="t"
+          v-for="t in (['turn','grid','log','suggest'] as const)" :key="t"
           class="flex-1 py-3 text-sm font-medium"
           :class="tab === t ? 'text-emerald-400 border-b-2 border-emerald-400' : 'text-slate-400'"
           @click="tab = t"
-        >{{ t === 'turn' ? 'New Turn' : t === 'grid' ? 'Sheet' : 'Log' }}</button>
+        >{{ t === 'turn' ? 'New Turn' : t === 'suggest' ? 'Suggest' : t === 'grid' ? 'Sheet' : 'Log' }}</button>
       </div>
     </nav>
 
     <main class="max-w-md mx-auto">
       <TurnEntry v-if="tab === 'turn'" />
       <DetectiveGrid v-else-if="tab === 'grid'" />
+      <SuggestView v-else-if="tab === 'suggest'" />
       <section v-else class="p-4 space-y-2">
         <h1 class="text-xl font-bold mb-2">Turn log</h1>
         <div v-if="turns.length === 0" class="text-sm text-slate-500">No turns recorded yet.</div>

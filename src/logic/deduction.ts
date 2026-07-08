@@ -134,7 +134,7 @@ function resolveNotes(grid: Grid, playerIds: string[]): boolean {
   return changed
 }
 
-function fixedPoint(grid: Grid, cards: Card[], players: string[]): void {
+export function fixedPoint(grid: Grid, cards: Card[], players: string[]): void {
   let changed = true
   while (changed) {
     changed = false
