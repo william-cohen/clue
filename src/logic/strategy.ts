@@ -1,6 +1,14 @@
-import type { Card, CellState, GameState, Grid, PlayerGrid, Suggestion } from './types'
+import type { Card, Chart, Grid, Setup, Suggestion } from './types'
 import { byCategory } from './cards'
-import { fixedPoint } from './deduction'
+import { foldEvent } from './engine'
+import type { SuggestionEvent } from './events'
+import { makeEventId } from './events'
+
+/** Combined view of setup + chart for the strategy engine. */
+export interface StrategyState {
+  setup: Setup
+  chart: Chart
+}
 
 export interface ScoredSuggestion {
   suggestion: Suggestion
@@ -116,50 +124,49 @@ function enumerateOutcomes(
   return outcomes
 }
 
-/** Deep-clone a grid including note arrays. */
-function deepCloneGrid(grid: Grid): Grid {
-  const out: Grid = {}
-  for (const k of Object.keys(grid)) {
-    const src = grid[k]
-    const newRow: PlayerGrid = {}
-    for (const pid of Object.keys(src)) {
-      const c = src[pid]
-      newRow[pid] = c.kind === 'note' ? { kind: 'note', ns: [...c.ns] } : c
-    }
-    out[k] = newRow
+/** Build a synthesized suggestion event for simulation. */
+function simEvent(
+  askerId: string,
+  suggestionCardIds: string[],
+  responses: { responderId: string; passed: boolean; shownCardId?: string | null }[]
+): SuggestionEvent {
+  return {
+    id: makeEventId(),
+    type: 'suggestion',
+    askerId,
+    suggestion: {
+      suspect: suggestionCardIds[0],
+      weapon: suggestionCardIds[1],
+      room: suggestionCardIds[2]
+    },
+    responses
   }
-  return out
 }
 
-/** Set a cell in a grid (mutating). */
-function setCellSim(grid: Grid, cid: string, pid: string, st: CellState): void {
-  grid[cid][pid] = st
-}
-
-/** Simulate an outcome's effect on entropy from a given observer's perspective.
- *  Uses the real deduction engine's fixedPoint to propagate consequences. */
+/**
+ * Simulate an outcome's effect on entropy from a given observer's perspective.
+ * Uses the pure engine's foldEvent to propagate consequences — no direct grid
+ * mutation. Pure with respect to the input chart.
+ */
 function entropyAfter(
-  grid: Grid,
+  chart: Chart,
   cards: Card[],
   playerIds: string[],
   observerHand: string[],
   suggestionCardIds: string[],
   outcome: Outcome,
-  observerIsAsker: boolean,
-  groupNumber: number
+  observerIsAsker: boolean
 ): number {
-  const simGrid = deepCloneGrid(grid)
-
   if (outcome.showerId === null) {
-    // All passed → every responder is crossed on all 3 cards
-    for (const rid of playerIds) {
-      if (rid === observerHand[0] && observerIsAsker) continue // asker doesn't pass to themselves
-      for (const cid of suggestionCardIds) {
-        if (simGrid[cid][rid].kind === 'empty') setCellSim(simGrid, cid, rid, { kind: 'cross' })
-      }
-    }
-    fixedPoint(simGrid, cards, playerIds)
-    return totalEntropy(simGrid, cards, playerIds, observerHand)
+    // All passed → every non-asker responder is crossed on all 3 cards.
+    // The asker is whoever the observer is (if observerIsAsker) or a placeholder;
+    // either way foldEvent crosses all passers on the suggested cards.
+    const askerId = observerIsAsker ? observerHand[0] : '__sim__'
+    const responses = playerIds
+      .filter((p) => p !== askerId)
+      .map((p) => ({ responderId: p, passed: true }))
+    const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
+    return totalEntropy(simChart.grid, cards, playerIds, observerHand)
   }
 
   // Someone showed.
@@ -167,97 +174,78 @@ function entropyAfter(
   const observerHolds = suggestionCardIds.filter((cid) => observerHand.includes(cid))
 
   if (observerIsAsker) {
-    // The asker SEES the actual card. We need to model which card was most likely shown.
-    // If the observer holds 2 of 3, the shower must have the 3rd → tick it.
-    // If the observer holds 1 of 3, the shower showed one of the other 2.
-    // If the observer holds 0, the shower showed one of 3 (pick the most informative).
+    // The asker SEES the actual card. Model which card was most likely shown.
+    const askerId = observerHand[0]
     if (observerHolds.length === 2) {
+      // Shower must have the 3rd card — we see it.
       const third = suggestionCardIds.find((cid) => !observerHolds.includes(cid))!
-      setCellSim(simGrid, third, shower, { kind: 'tick' })
-      fixedPoint(simGrid, cards, playerIds)
-      return totalEntropy(simGrid, cards, playerIds, observerHand)
+      const responses = [
+        { responderId: shower, passed: false, shownCardId: third }
+      ]
+      const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
+      return totalEntropy(simChart.grid, cards, playerIds, observerHand)
     } else if (observerHolds.length === 1) {
-      // The shower has one of the 2 non-observer cards. Pick the one with more uncertainty
-      // (more possible holders) to resolve → that's the one most likely to be shown.
-      // Actually, we don't know which — model both possibilities and average.
+      // Shower has one of the 2 non-observer cards — we don't know which. Average.
       const candidates = suggestionCardIds.filter((cid) => !observerHolds.includes(cid))
       let avgH = 0
       for (const shown of candidates) {
-        const g = deepCloneGrid(simGrid)
-        setCellSim(g, shown, shower, { kind: 'tick' })
-        fixedPoint(g, cards, playerIds)
-        avgH += totalEntropy(g, cards, playerIds, observerHand)
+        const responses = [{ responderId: shower, passed: false, shownCardId: shown }]
+        const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
+        avgH += totalEntropy(simChart.grid, cards, playerIds, observerHand)
       }
       return avgH / candidates.length
     } else {
-      // Observer holds 0. The shower showed one of 3. Average over the 3 possibilities,
-      // weighted by how likely the shower is to hold each card.
-      const candidates = suggestionCardIds.filter((cid) => simGrid[cid][shower].kind !== 'cross' && simGrid[cid][shower].kind !== 'tick')
+      // Observer holds 0. Shower showed one of 3 — average weighted by likelihood.
+      const candidates = suggestionCardIds.filter((cid) => {
+        const cell = chart.grid[cid][shower]
+        return cell.kind !== 'cross' && cell.kind !== 'tick'
+      })
       if (candidates.length === 0) {
         // Contradiction — shower shouldn't have been able to show. Return current entropy.
-        return totalEntropy(simGrid, cards, playerIds, observerHand)
+        return totalEntropy(chart.grid, cards, playerIds, observerHand)
       }
-      // Weight by inverse of possible holders (fewer holders = more likely they have it)
       const weights = candidates.map((cid) => {
-        const holders = possibleHolders(simGrid, cid, playerIds, observerHand)
+        const holders = possibleHolders(chart.grid, cid, playerIds, observerHand)
         return holders.length > 0 ? 1 / holders.length : 1
       })
       const wSum = weights.reduce((s, w) => s + w, 0)
       let avgH = 0
       for (let i = 0; i < candidates.length; i++) {
-        const g = deepCloneGrid(simGrid)
-        setCellSim(g, candidates[i], shower, { kind: 'tick' })
-        fixedPoint(g, cards, playerIds)
-        avgH += (weights[i] / wSum) * totalEntropy(g, cards, playerIds, observerHand)
+        const responses = [{ responderId: shower, passed: false, shownCardId: candidates[i] }]
+        const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
+        avgH += (weights[i] / wSum) * totalEntropy(simChart.grid, cards, playerIds, observerHand)
       }
       return avgH
     }
   } else {
     // Observer is NOT the asker (an opponent watching).
-    // They only know: passers don't have any of the 3; the shower has at least one.
-    // Passers already handled by the caller? No — we need to cross prior passers too.
-    // The outcome only tells us the shower; prior responders must have passed.
-    // But we don't know who passed before the shower here — that's handled by enumerateOutcomes
-    // and we only get the final shower. We approximate: cross all non-shower responders on the 3 cards
-    // (they passed), and for the shower, add a note group to the non-X cells.
-    for (const rid of playerIds) {
-      if (rid === shower) continue
-      for (const cid of suggestionCardIds) {
-        if (simGrid[cid][rid].kind === 'empty') setCellSim(simGrid, cid, rid, { kind: 'cross' })
-      }
-    }
-    // Shower has at least one of the 3 → add a note group to non-X cells
-    const nonX = suggestionCardIds.filter((cid) => simGrid[cid][shower].kind !== 'cross' && simGrid[cid][shower].kind !== 'tick')
-    if (nonX.length >= 2) {
-      for (const cid of nonX) {
-        const cur = simGrid[cid][shower]
-        if (cur.kind === 'note') {
-          if (!cur.ns.includes(groupNumber)) setCellSim(simGrid, cid, shower, { kind: 'note', ns: [...cur.ns, groupNumber].sort((a, b) => a - b) })
-        } else if (cur.kind === 'empty') {
-          setCellSim(simGrid, cid, shower, { kind: 'note', ns: [groupNumber] })
-        }
-      }
-    } else if (nonX.length === 1) {
-      setCellSim(simGrid, nonX[0], shower, { kind: 'tick' })
-    }
-    fixedPoint(simGrid, cards, playerIds)
-    return totalEntropy(simGrid, cards, playerIds, observerHand)
+    // They only know: passers don't have any of the 3; the shower has at least one,
+    // but they DON'T see which card (shownCardId: null) → foldEvent creates a note group.
+    const askerId = '__sim__'
+    const responses: { responderId: string; passed: boolean; shownCardId?: string | null }[] = playerIds
+      .filter((p) => p !== askerId && p !== shower)
+      .map((p) => ({ responderId: p, passed: true }))
+    responses.push({ responderId: shower, passed: false, shownCardId: null })
+    // foldEvent processes passers first, then the shower — order in responses
+    // matters only for "first shower ends it"; here the shower is last which is fine.
+    const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
+    return totalEntropy(simChart.grid, cards, playerIds, observerHand)
   }
 }
 
 /** Score a single suggestion. */
 function scoreSuggestion(
-  state: GameState,
+  state: StrategyState,
   meId: string,
   suggestion: Suggestion,
   suggestionNames: { suspect: string; weapon: string; room: string },
   reachable: boolean,
   responderOrder: string[]
 ): ScoredSuggestion {
-  const grid = state.grid
-  const cards = state.cards
-  const playerIds = state.players.map((p) => p.id)
-  const meHand = state.players.find((p) => p.id === meId)?.hand ?? []
+  const grid = state.chart.grid
+  const cards = state.setup.cards
+  const playerIds = state.setup.players.map((p) => p.id)
+  const meHand = state.setup.players.find((p) => p.id === meId)?.hand ?? []
 
   const suggestionCardIds = [suggestion.suspect, suggestion.weapon, suggestion.room]
 
@@ -265,7 +253,7 @@ function scoreSuggestion(
   const ourEntropyBefore = totalEntropy(grid, cards, playerIds, meHand)
 
   // Opponents' entropy before
-  const opponents = state.players.filter((p) => p.id !== meId)
+  const opponents = state.setup.players.filter((p) => p.id !== meId)
   const oppEntropyBefore: Record<string, number> = {}
   for (const opp of opponents) {
     // Opponent knows their own hand
@@ -274,7 +262,6 @@ function scoreSuggestion(
 
   // Enumerate outcomes
   const outcomes = enumerateOutcomes(grid, suggestionCardIds, responderOrder)
-  const groupNum = state.nextGroupNumber
 
   // Expected entropy after, from our perspective
   let ourEntropyAfter = 0
@@ -285,11 +272,11 @@ function scoreSuggestion(
   const outcomeDetails: { label: string; prob: number; ourGain: number }[] = []
 
   for (const o of outcomes) {
-    const hAfter = entropyAfter(grid, cards, playerIds, meHand, suggestionCardIds, o, true, groupNum)
+    const hAfter = entropyAfter(state.chart, cards, playerIds, meHand, suggestionCardIds, o, true)
     ourEntropyAfter += o.prob * hAfter
 
     for (const opp of opponents) {
-      const oppHAfter = entropyAfter(grid, cards, playerIds, opp.hand, suggestionCardIds, o, false, groupNum)
+      const oppHAfter = entropyAfter(state.chart, cards, playerIds, opp.hand, suggestionCardIds, o, false)
       opponentEntropyAfter[opp.id] += o.prob * oppHAfter
     }
 
@@ -301,7 +288,7 @@ function scoreSuggestion(
     }
 
     const label = o.showerId
-      ? `${state.players.find((p) => p.id === o.showerId)?.name ?? '?'} shows`
+      ? `${state.setup.players.find((p) => p.id === o.showerId)?.name ?? '?'} shows`
       : 'all pass'
     outcomeDetails.push({
       label,
@@ -360,17 +347,17 @@ function scoreSuggestion(
 
 /** Score all suggestions and return the best ones, sorted by net score. */
 export function suggestBestQuestions(
-  state: GameState,
+  state: StrategyState,
   meId: string,
   reachableRoomIds: string[],
   allRoomsReachable: boolean
 ): ScoredSuggestion[] {
-  const grouped = byCategory(state.cards)
-  const meObj = state.players.find((p) => p.id === meId)
+  const grouped = byCategory(state.setup.cards)
+  const meObj = state.setup.players.find((p) => p.id === meId)
   if (!meObj) return []
 
   // Responder order: players after me in seat order
-  const seatOrder = state.players.map((p) => p.id)
+  const seatOrder = state.setup.players.map((p) => p.id)
   const myIdx = seatOrder.indexOf(meId)
   const responderOrder: string[] = []
   for (let i = 1; i <= seatOrder.length - 1; i++) {

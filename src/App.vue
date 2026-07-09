@@ -5,7 +5,7 @@ import SetupView from './views/SetupView.vue'
 import PlayView from './views/PlayView.vue'
 
 const store = useGameStore()
-const phase = computed(() => store.state.phase)
+const phase = computed(() => store.phase)
 const gameId = ref(0)
 
 onMounted(() => {

@@ -18,7 +18,7 @@ const nums = [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 const style = computed(() => {
   const vw = typeof window !== 'undefined' ? window.innerWidth : 400
-  const left = Math.min(props.x, vw - 200)
+  const left = Math.min(props.x, vw - 220)
   const top = Math.max(8, props.y - 120)
   return { left: `${left}px`, top: `${top}px` }
 })
@@ -26,7 +26,7 @@ const style = computed(() => {
 
 <template>
   <div
-    class="fixed z-50 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-2"
+    class="fixed z-50 bg-slate-800 border border-slate-600 rounded-xl shadow-2xl p-2 w-[200px]"
     :style="style"
     @pointerdown.stop
     @click.stop

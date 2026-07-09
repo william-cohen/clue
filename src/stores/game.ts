@@ -1,31 +1,27 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import type {
-  Card, CellState, Edition, GameState, Grid, Player,
-  Response, Suggestion, Turn
+  Card, CellState, Chart, Edition, Player, Setup,
+  Response, Suggestion, GameEvent, ManualEntry
 } from '../logic/types'
-import { buildCards, CLASSIC_EDITION, slug } from '../logic/cards'
-import {
-  applyHand, applyTurn, cloneState, cycleCell, makeGrid, setCell
-} from '../logic/deduction'
+import { buildCards, CLASSIC_EDITION } from '../logic/cards'
+import { buildChart, cycleCell } from '../logic/engine'
+import { makeEventId } from '../logic/events'
+import type { SuggestionEvent, ManualEvent } from '../logic/events'
 
-const HISTORY_LIMIT = 50
-const STORAGE_KEY = 'clue-sheet-v1'
+const STORAGE_KEY = 'clue-sheet-v2'
 
-function freshState(): GameState {
+function blankSetup(): Setup {
   const edition: Edition = {
     rooms: [...CLASSIC_EDITION.rooms],
     suspects: [...CLASSIC_EDITION.suspects],
     weapons: [...CLASSIC_EDITION.weapons]
   }
-  const cards = buildCards(edition)
   return {
     edition,
-    cards,
+    cards: buildCards(edition),
     players: [],
-    grid: {},
-    turns: [],
-    nextGroupNumber: 1,
+    myHand: [],
     phase: 'setup'
   }
 }
@@ -34,153 +30,187 @@ function rid(): string {
   return `p-${Math.random().toString(36).slice(2, 9)}`
 }
 
+/** Migrate old single-cell manual events to the multi-entry shape. */
+function migrateManualEvents(events: any[]): GameEvent[] {
+  return events.map((e: any) => {
+    if (e?.type === 'manual' && e.cardId && e.playerId && e.state && !e.entries) {
+      return {
+        id: e.id,
+        type: 'manual',
+        entries: [{ cardId: e.cardId, playerId: e.playerId, state: e.state }],
+        description: e.description ?? ''
+      } as ManualEvent
+    }
+    return e as GameEvent
+  })
+}
+
 export const useGameStore = defineStore('game', () => {
-  const state = ref<GameState>(freshState())
+  const setup = ref<Setup>(blankSetup())
+  const events = ref<GameEvent[]>([])
+  const pointer = ref(0)
 
-  const past = ref<GameState[]>([])
-  const future = ref<GameState[]>([])
+  // Derived chart — the source of truth for the grid
+  const chart = computed<Chart>(() =>
+    buildChart(events.value.slice(0, pointer.value), setup.value.cards, setup.value.players)
+  )
 
-  const canUndo = computed(() => past.value.length > 0)
-  const canRedo = computed(() => future.value.length > 0)
+  // Convenience accessors for components
+  const cards = computed(() => setup.value.cards)
+  const players = computed(() => setup.value.players)
+  const grid = computed(() => chart.value.grid)
+  const groups = computed(() => chart.value.groups)
+  const nextGroupNumber = computed(() => chart.value.nextGroupNumber)
+  const phase = computed(() => setup.value.phase)
 
-  function snapshot(): void {
-    past.value.push(cloneState(state.value))
-    if (past.value.length > HISTORY_LIMIT) past.value.shift()
-    future.value = []
-  }
+  // Event lists for display
+  const suggestionEvents = computed(() => events.value.filter((e): e is SuggestionEvent => e.type === 'suggestion'))
+  const manualEvents = computed(() => events.value.filter((e): e is ManualEvent => e.type === 'manual'))
 
-  function commit(next: GameState): void {
-    state.value = next
-    persist()
-  }
+  // Undo/redo: pointer moves through the event log
+  const canUndo = computed(() => pointer.value > 0)
+  const canRedo = computed(() => pointer.value < events.value.length)
 
-  // --- Setup actions ---
+  // ── Setup actions ────────────────────────────────────────────────
 
   function setEdition(edition: Edition): void {
-    snapshot()
-    const cards = buildCards(edition)
-    const next = cloneState(state.value)
-    next.edition = {
-      rooms: [...edition.rooms],
-      suspects: [...edition.suspects],
-      weapons: [...edition.weapons]
+    setup.value = {
+      ...blankSetup(),
+      edition: {
+        rooms: [...edition.rooms],
+        suspects: [...edition.suspects],
+        weapons: [...edition.weapons]
+      },
+      cards: buildCards(edition)
     }
-    next.cards = cards
-    // reset grid/players since card set changed
-    next.players = []
-    next.grid = {}
-    next.turns = []
-    next.phase = 'setup'
-    commit(next)
+    events.value = []
+    pointer.value = 0
+    persist()
   }
 
   function setPlayers(names: string[], meIndex: number): void {
-    snapshot()
-    const next = cloneState(state.value)
-    next.players = names.map((name, i) => ({
-      id: rid(),
-      name: name.trim() || `Player ${i + 1}`,
-      isMe: i === meIndex,
-      hand: []
-    }))
-    next.grid = makeGrid(next.cards, next.players.map((p) => p.id))
-    next.turns = []
-    next.nextGroupNumber = 1
-    next.phase = 'setup'
-    commit(next)
+    setup.value = {
+      ...setup.value,
+      players: names.map((name, i) => ({
+        id: rid(),
+        name: name.trim() || `Player ${i + 1}`,
+        isMe: i === meIndex,
+        hand: []
+      })),
+      phase: 'setup'
+    }
+    events.value = []
+    pointer.value = 0
+    persist()
   }
 
   function setMyHand(cardIds: string[]): void {
-    snapshot()
-    const next = cloneState(state.value)
-    const me = next.players.find((p) => p.isMe)
+    const me = setup.value.players.find((p) => p.isMe)
     if (!me) return
     me.hand = [...cardIds]
-    next.grid = applyHand(
-      makeGrid(next.cards, next.players.map((p) => p.id)),
-      next.cards,
-      next.players.map((p) => p.id),
-      me.id,
-      cardIds
-    )
-    next.phase = 'play'
-    commit(next)
+    setup.value = { ...setup.value, myHand: [...cardIds], phase: 'play' }
+    persist()
   }
 
-  // --- Play actions ---
+  // ── Event actions ────────────────────────────────────────────────
 
-  function addTurn(askerId: string, suggestion: Suggestion, responses: Response[]): void {
-    snapshot()
-    const { grid, turn } = applyTurn(state.value, askerId, suggestion, responses)
-    const next = cloneState(state.value)
-    next.grid = grid
-    next.turns.push(turn)
-    if (turn.groupNumber != null) next.nextGroupNumber = state.value.nextGroupNumber + 1
-    commit(next)
+  function commitEvent(event: GameEvent): void {
+    // Truncate any redo events
+    events.value = [...events.value.slice(0, pointer.value), event]
+    pointer.value = events.value.length
+    persist()
+  }
+
+  function addSuggestion(askerId: string, suggestion: Suggestion, responses: Response[]): void {
+    const event: SuggestionEvent = {
+      id: makeEventId(),
+      type: 'suggestion',
+      askerId,
+      suggestion,
+      responses
+    }
+    commitEvent(event)
+  }
+
+  function addManualEntry(cardId: string, playerId: string, state: CellState, description: string): void {
+    addManualEntries([{ cardId, playerId, state }], description)
+  }
+
+  function addManualEntries(entries: ManualEntry[], description: string): void {
+    if (entries.length === 0) return
+    const event: ManualEvent = {
+      id: makeEventId(),
+      type: 'manual',
+      entries,
+      description
+    }
+    commitEvent(event)
   }
 
   function cycleCellState(cardId: string, playerId: string): void {
-    snapshot()
-    const next = cloneState(state.value)
-    const cur = next.grid[cardId][playerId]
-    const newSt = cycleCell(cur, next.nextGroupNumber)
-    next.grid = setCell(next, cardId, playerId, newSt)
-    if (newSt.kind === 'note') next.nextGroupNumber = Math.max(next.nextGroupNumber, ...newSt.ns, 0) + 1
-    commit(next)
+    const cur = chart.value.grid[cardId][playerId]
+    const newSt = cycleCell(cur, chart.value.nextGroupNumber)
+    addManualEntry(cardId, playerId, newSt, '')
   }
 
-  function setCellState(cardId: string, playerId: string, st: CellState): void {
-    snapshot()
-    const next = cloneState(state.value)
-    next.grid = setCell(next, cardId, playerId, st)
-    commit(next)
+  function setCellState(cardId: string, playerId: string, st: CellState, description = ''): void {
+    addManualEntry(cardId, playerId, st, description)
   }
 
-  function removeLastTurn(): void {
-    if (state.value.turns.length === 0) return
-    snapshot()
-    const next = cloneState(state.value)
-    next.turns.pop()
-    // Recompute grid from scratch using initial hand + remaining turns.
-    const me = next.players.find((p) => p.isMe)
-    let grid = makeGrid(next.cards, next.players.map((p) => p.id))
-    if (me && me.hand.length) {
-      grid = applyHand(grid, next.cards, next.players.map((p) => p.id), me.id, me.hand)
+  function removeEvent(eventId: string): void {
+    const idx = events.value.findIndex((e) => e.id === eventId)
+    if (idx < 0) return
+    events.value = events.value.filter((e) => e.id !== eventId)
+    if (pointer.value > events.value.length) pointer.value = events.value.length
+    persist()
+  }
+
+  function removeLastSuggestion(): void {
+    // Find the last suggestion event
+    for (let i = events.value.length - 1; i >= 0; i--) {
+      if (events.value[i].type === 'suggestion') {
+        const id = events.value[i].id
+        removeEvent(id)
+        return
+      }
     }
-    let nextGroup = 1
-    for (const t of next.turns) {
-      const r = applyTurn({ ...next, grid, nextGroupNumber: nextGroup }, t.askerId, t.suggestion, t.responses)
-      grid = r.grid
-      if (r.turn.groupNumber != null) nextGroup += 1
-    }
-    next.grid = grid
-    next.nextGroupNumber = nextGroup
-    commit(next)
   }
 
-  // --- Undo / redo ---
+  // ── Undo/redo ────────────────────────────────────────────────────
 
   function undo(): void {
-    if (!canUndo.value) return
-    future.value.push(cloneState(state.value))
-    const prev = past.value.pop()!
-    state.value = prev
-    persist()
+    if (pointer.value > 0) {
+      pointer.value--
+      persist()
+    }
   }
 
   function redo(): void {
-    if (!canRedo.value) return
-    past.value.push(cloneState(state.value))
-    const nxt = future.value.pop()!
-    state.value = nxt
+    if (pointer.value < events.value.length) {
+      pointer.value++
+      persist()
+    }
+  }
+
+  // ── Reset ────────────────────────────────────────────────────────
+
+  function resetAll(): void {
+    setup.value = blankSetup()
+    events.value = []
+    pointer.value = 0
     persist()
   }
 
-  // --- Persistence ---
+  // ── Persistence ──────────────────────────────────────────────────
 
   function persist(): void {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state.value))
+      const data = {
+        setup: setup.value,
+        events: events.value,
+        pointer: pointer.value
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
     } catch (e) {
       console.warn('persist failed', e)
     }
@@ -190,30 +220,63 @@ export const useGameStore = defineStore('game', () => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY)
       if (!raw) return
-      const parsed = JSON.parse(raw) as GameState
-      // basic shape check
-      if (parsed && parsed.cards && parsed.players) state.value = parsed
+      const parsed = JSON.parse(raw)
+      if (parsed?.setup && parsed?.events) {
+        setup.value = parsed.setup
+        events.value = migrateManualEvents(parsed.events)
+        pointer.value = parsed.pointer ?? events.value.length
+      } else if (parsed?.cards && parsed?.players) {
+        // Migrate old format (GameState → event-sourced)
+        migrateOldFormat(parsed)
+      }
     } catch (e) {
       console.warn('load failed', e)
     }
   }
 
-  function resetAll(): void {
-    past.value = []
-    future.value = []
-    state.value = freshState()
+  function migrateOldFormat(old: any): void {
+    // Old format had: edition, cards, players, grid, turns, nextGroupNumber, phase
+    setup.value = {
+      edition: old.edition,
+      cards: old.cards,
+      players: old.players,
+      myHand: old.players.find((p: any) => p.isMe)?.hand ?? [],
+      phase: old.phase ?? 'play'
+    }
+    const newEvents: GameEvent[] = []
+    if (old.turns) {
+      for (const t of old.turns) {
+        newEvents.push({
+          id: makeEventId(),
+          type: 'suggestion',
+          askerId: t.askerId,
+          suggestion: t.suggestion,
+          responses: t.responses
+        })
+      }
+    }
+    events.value = newEvents
+    pointer.value = newEvents.length
     persist()
   }
 
   return {
-    state,
+    // state
+    setup, events, pointer,
+    chart, cards, players, grid, groups, nextGroupNumber, phase,
+    suggestionEvents, manualEvents,
     canUndo, canRedo,
+    // setup actions
     setEdition, setPlayers, setMyHand,
-    addTurn, cycleCellState, setCellState, removeLastTurn,
-    undo, redo, resetAll, load
+    // event actions
+    addSuggestion, addManualEntry, addManualEntries, cycleCellState, setCellState,
+    removeEvent, removeLastSuggestion,
+    // undo/redo
+    undo, redo,
+    // misc
+    resetAll, load
   }
 })
 
 // re-export for components
-export type { Card, Edition, GameState, Grid, Player, Response, Suggestion, Turn, CellState }
-export { slug }
+export type { Card, Edition, Player, Response, Suggestion, CellState, GameEvent }

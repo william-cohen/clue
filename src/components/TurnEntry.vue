@@ -5,26 +5,25 @@ import { byCategory } from '../logic/cards'
 import type { Response, Suggestion } from '../logic/types'
 
 const store = useGameStore()
-const state = computed(() => store.state)
 
-const askerId = ref<string>(state.value.players[0]?.id ?? '')
+const askerId = ref<string>(store.players[0]?.id ?? '')
 const suspectName = ref<string | null>(null)
 const weaponName = ref<string | null>(null)
 const roomName = ref<string | null>(null)
 
-const cards = computed(() => byCategory(state.value.cards))
+const cards = computed(() => byCategory(store.cards))
 const roomNames = computed(() => cards.value.room.map((c) => c.name))
 const suspectNames = computed(() => cards.value.suspect.map((c) => c.name))
 const weaponNames = computed(() => cards.value.weapon.map((c) => c.name))
 
 const playerById = computed(() => {
   const m: Record<string, { id: string; name: string; isMe: boolean }> = {}
-  for (const p of state.value.players) m[p.id] = p
+  for (const p of store.players) m[p.id] = p
   return m
 })
 
 // responders are players in seat order starting after the asker, until someone shows.
-const seatOrder = computed(() => state.value.players.map((p) => p.id))
+const seatOrder = computed(() => store.players.map((p) => p.id))
 const responders = computed(() => {
   const ids = seatOrder.value
   const idx = ids.indexOf(askerId.value)
@@ -109,7 +108,7 @@ const firstShower = computed<string | null>(() => {
 void firstShower
 
 const askerIsMe = computed(() => {
-  const a = state.value.players.find((p) => p.id === askerId.value)
+  const a = store.players.find((p) => p.id === askerId.value)
   return a?.isMe ?? false
 })
 
@@ -182,7 +181,7 @@ function submit() {
     weapon: slug(weaponName.value!),
     room: slug(roomName.value!)
   }
-  store.addTurn(askerId.value, sugg, rs)
+  store.addSuggestion(askerId.value, sugg, rs)
   resetForm()
 }
 
@@ -198,7 +197,7 @@ function meLabel(r: { isMe: boolean }): string {
     <section class="space-y-2">
       <label class="text-xs uppercase text-slate-400">Asker</label>
       <select v-model="askerId" class="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700">
-        <option v-for="p in state.players" :key="p.id" :value="p.id">{{ p.name }}{{ p.isMe ? ' (me)' : '' }}</option>
+        <option v-for="p in store.players" :key="p.id" :value="p.id">{{ p.name }}{{ p.isMe ? ' (me)' : '' }}</option>
       </select>
     </section>
 

@@ -6,10 +6,9 @@ import { suggestBestQuestions, shouldPassTurn } from '../logic/strategy'
 import type { ScoredSuggestion } from '../logic/strategy'
 
 const store = useGameStore()
-const state = computed(() => store.state)
 
-const me = computed(() => state.value.players.find((p) => p.isMe))
-const rooms = computed(() => byCategory(state.value.cards).room)
+const me = computed(() => store.players.find((p) => p.isMe))
+const rooms = computed(() => byCategory(store.cards).room)
 
 // Which rooms can I reach this turn?
 // Default: all rooms (if the user hasn't specified). In real Cluedo you can only suggest
@@ -36,7 +35,13 @@ const allRoomsReachable = computed(() => reachableRoomIds.value.length === 0)
 
 const scored = computed<ScoredSuggestion[]>(() => {
   if (!me.value) return []
-  return suggestBestQuestions(state.value, me.value.id, reachableRoomIds.value, allRoomsReachable.value)
+  if (!me.value) return []
+  return suggestBestQuestions(
+    { setup: store.setup, chart: store.chart },
+    me.value.id,
+    reachableRoomIds.value,
+    allRoomsReachable.value
+  )
 })
 
 const topSuggestions = computed(() => scored.value.slice(0, 8))

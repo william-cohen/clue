@@ -5,6 +5,7 @@ import type { CellState } from '../logic/types'
 const props = defineProps<{
   state: CellState
   me?: boolean
+  dirty?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -71,8 +72,11 @@ function onClick() {
 <template>
   <button
     type="button"
-    class="w-9 h-9 flex items-center justify-center font-bold select-none rounded-md border border-slate-700 bg-slate-800/40 active:bg-slate-700 touch-none"
-    :class="[colorClass, noteSize]"
+    class="w-9 h-9 flex items-center justify-center font-bold select-none rounded-md border bg-slate-800/40 active:bg-slate-700 touch-none transition-colors"
+    :class="[
+      colorClass, noteSize,
+      props.dirty ? 'border-amber-400 ring-2 ring-amber-400/50' : 'border-slate-700'
+    ]"
     @pointerdown="startPress"
     @pointerup="endPress"
     @pointerleave="endPress"
