@@ -167,6 +167,33 @@ describe('engine: propagate', () => {
     expect(getCell(chart, KI, 'p1')).toEqual({ kind: 'tick' })
   })
 
+  it('a tick on one card in a group does NOT tick the other (holds at least one, not exactly one)', () => {
+    const setup = buildSetup()
+    const playerIds = setup.players.map((p) => p.id)
+    // p1 shows on {S, CA} → group 1 on {S, CA} (two-card group, both noted for p1).
+    let chart = blankChart(setup.cards, playerIds)
+    chart = foldEvent(chart, suggEvent('p0', S, CA, LO, [{ responderId: 'p1', passed: false }]), playerIds)
+    // S and CA both have note(1) for p1; LO is not in the group (p1 would have been
+    // crossed on LO if p0's suggestion included LO... actually LO is the room and
+    // p1 showed, so LO is also a candidate. Let's make the group exactly {S, CA}
+    // by crossing p1 on LO first via a prior pass.)
+    // Redo: cross p1 on LO first, then p1 shows on {S, CA, LO} → group on {S, CA} only.
+    chart = blankChart(setup.cards, playerIds)
+    chart = foldEvent(chart, suggEvent('p0', LO, RO, KI, [{ responderId: 'p1', passed: true }]), playerIds)
+    // Now p1 has X on LO → showing on {S, CA, LO} means group is {S, CA} (non-X cards).
+    chart = foldEvent(chart, suggEvent('p0', S, CA, LO, [{ responderId: 'p1', passed: false }]), playerIds)
+    // Confirm the group is {S, CA} and both are notes for p1.
+    expect(getCell(chart, S, 'p1').kind).toBe('note')
+    expect(getCell(chart, CA, 'p1').kind).toBe('note')
+    // Now: someone reveals that p1 holds S (e.g. via a shownCardId in a later suggestion).
+    // Tick S/p1. The group constraint is satisfied — p1 holds at least one of {S, CA}.
+    // But p1 may or may not also hold CA. The engine must NOT tick CA.
+    chart = foldEvent(chart, suggEvent('p0', S, KN, KI, [{ responderId: 'p1', passed: false, shownCardId: S }]), playerIds)
+    expect(getCell(chart, S, 'p1')).toEqual({ kind: 'tick' })
+    // CA/p1 must remain a note, NOT a tick — p1 could hold both, or just S.
+    expect(getCell(chart, CA, 'p1').kind).toBe('note')
+  })
+
   it('all-but-one X does NOT tick the last player (the envelope bug)', () => {
     const setup = buildSetup()
     const playerIds = setup.players.map((p) => p.id)

@@ -112,25 +112,23 @@ function propagateTickUniqueness(grid: Grid, players: string[], cardId: string, 
 /**
  * Resolve suggestion groups using the groups map.
  * For each group: the player *showed* on these cards, so they hold at least one.
- * If all but one of the original cardIds is now X (or tick) for the player,
+ * If all but one of the original cardIds is now **crossed** for the player,
  * the remaining card must be the one they showed → tick it. This is sound because
  * a show proves the player holds at least one of the three (so the remaining card
  * is not in the envelope — it is in their hand).
+ *
+ * A **tick** on one group card satisfies the "holds at least one" constraint but
+ * does NOT eliminate the others — the player may hold more than one. So ticks are
+ * NOT counted as eliminated; only crosses (proven NOT held) count.
  */
 function resolveNotes(grid: Grid, groups: Record<number, SuggestionGroup>): boolean {
   let changed = false
   for (const n of Object.keys(groups)) {
     const group = groups[Number(n)]
     const { playerId, cardIds } = group
-    const eliminated = cardIds.filter((cid) => {
-      const c = grid[cid][playerId]
-      return c.kind === 'cross' || c.kind === 'tick'
-    })
-    const remaining = cardIds.filter((cid) => {
-      const c = grid[cid][playerId]
-      return c.kind !== 'cross' && c.kind !== 'tick'
-    })
-    if (remaining.length === 1 && eliminated.length === cardIds.length - 1) {
+    const crossed = cardIds.filter((cid) => grid[cid][playerId].kind === 'cross')
+    const remaining = cardIds.filter((cid) => grid[cid][playerId].kind !== 'cross' && grid[cid][playerId].kind !== 'tick')
+    if (remaining.length === 1 && crossed.length === cardIds.length - 1) {
       if (set(grid, remaining[0], playerId, { kind: 'tick' })) changed = true
     }
   }
