@@ -1,13 +1,15 @@
-import type { Card, Chart, Grid, Setup, Suggestion } from './types'
+import type { Card, Chart, Grid, GameEvent, Setup, Suggestion } from './types'
 import { byCategory } from './cards'
 import { foldEvent } from './engine'
 import type { SuggestionEvent } from './events'
 import { makeEventId } from './events'
+import { buildProbabilities, type ProbMap } from './bayes'
 
-/** Combined view of setup + chart for the strategy engine. */
+/** Combined view of setup + chart + event log for the strategy engine. */
 export interface StrategyState {
   setup: Setup
   chart: Chart
+  events: GameEvent[]
 }
 
 export interface ScoredSuggestion {
@@ -63,21 +65,20 @@ function totalEntropy(grid: Grid, cards: Card[], playerIds: string[], observerHa
   return h
 }
 
-/** Estimate probability that a responder can show one of the 3 suggested cards. */
-function showProbability(grid: Grid, cardIds: string[], responderId: string): number {
+/** Estimate probability that a responder can show one of the 3 suggested cards.
+ *  Uses Bayesian posteriors from the probability map for sharper estimates. */
+function showProbability(grid: Grid, probs: ProbMap, cardIds: string[], responderId: string): number {
   // If any of the 3 is already ticked for the responder → they definitely can show (they have it).
   for (const cid of cardIds) {
     if (grid[cid][responderId].kind === 'tick') return 1
   }
-  // Otherwise, estimate: fraction of the 3 cards that aren't crossed for them.
+  // If all 3 are crossed → they definitely cannot show.
   const nonX = cardIds.filter((cid) => grid[cid][responderId].kind !== 'cross')
   if (nonX.length === 0) return 0
-  // Rough heuristic: more non-X cards → higher chance they hold at least one.
-  // Use 1 - product of (1 - p_each), where p_each ~ 1/possibleHolders.
+  // P(holds at least one) = 1 - Π(1 - P(holds X))
   let pShow = 1
   for (const cid of nonX) {
-    const holders = possibleHolders(grid, cid, [responderId], [])
-    const p = holders.includes(responderId) ? 1 / holders.length : 0
+    const p = probs[cid]?.[responderId] ?? 0
     pShow *= (1 - p)
   }
   return Math.min(1, 1 - pShow)
@@ -92,6 +93,7 @@ interface Outcome {
 /** Enumerate possible outcomes for a suggestion given turn order. */
 function enumerateOutcomes(
   grid: Grid,
+  probs: ProbMap,
   suggestionCardIds: string[],
   responderOrder: string[]
 ): Outcome[] {
@@ -102,7 +104,7 @@ function enumerateOutcomes(
 
   for (let i = 0; i < responderOrder.length; i++) {
     const rid = responderOrder[i]
-    const pShow = showProbability(grid, suggestionCardIds, rid)
+    const pShow = showProbability(grid, probs, suggestionCardIds, rid)
     const pPass = 1 - pShow
 
     // outcome: this responder shows
@@ -260,8 +262,16 @@ function scoreSuggestion(
     oppEntropyBefore[opp.id] = totalEntropy(grid, cards, playerIds, opp.hand)
   }
 
+  // Bayesian probability map — sharper than the grid alone for outcome prediction
+  const probs = buildProbabilities(
+    state.events,
+    cards,
+    playerIds,
+    state.chart
+  )
+
   // Enumerate outcomes
-  const outcomes = enumerateOutcomes(grid, suggestionCardIds, responderOrder)
+  const outcomes = enumerateOutcomes(grid, probs, suggestionCardIds, responderOrder)
 
   // Expected entropy after, from our perspective
   let ourEntropyAfter = 0

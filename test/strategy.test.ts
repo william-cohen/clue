@@ -31,7 +31,7 @@ function buildStrategyState(
   events: GameEvent[] = []
 ): StrategyState {
   const chart = buildChart(events, setup.cards, setup.players)
-  return { setup, chart }
+  return { setup, chart, events }
 }
 
 function suggestionEvent(

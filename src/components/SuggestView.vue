@@ -37,7 +37,7 @@ const scored = computed<ScoredSuggestion[]>(() => {
   if (!me.value) return []
   if (!me.value) return []
   return suggestBestQuestions(
-    { setup: store.setup, chart: store.chart },
+    { setup: store.setup, chart: store.chart, events: store.events.slice(0, store.pointer) },
     me.value.id,
     reachableRoomIds.value,
     allRoomsReachable.value

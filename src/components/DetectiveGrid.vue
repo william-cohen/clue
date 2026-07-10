@@ -3,11 +3,25 @@ import { computed, ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { useGameStore } from '../stores/game'
 import { byCategory } from '../logic/cards'
 import { cycleCell } from '../logic/engine'
+import { buildProbabilities, type ProbMap } from '../logic/bayes'
 import type { CellState } from '../logic/types'
 import GridCell from './GridCell.vue'
 import NumberPad from './NumberPad.vue'
 
 const store = useGameStore()
+
+const probs = computed<ProbMap>(() =>
+  buildProbabilities(
+    store.events.slice(0, store.pointer),
+    store.cards,
+    store.players.map((p) => p.id),
+    store.chart
+  )
+)
+
+function probFor(cardId: string, playerId: string): number {
+  return probs.value[cardId]?.[playerId] ?? 0
+}
 
 const grouped = computed(() => {
   return byCategory(store.cards)
@@ -210,6 +224,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 :state="displayState(card.id, pid)"
                 :me="playerById[pid].isMe"
                 :dirty="isDirty(card.id, pid)"
+                :prob="probFor(card.id, pid)"
                 @tap="tapCell(card.id, pid)"
                 @longpress="onLongPress(card.id, pid, $event)"
               />
