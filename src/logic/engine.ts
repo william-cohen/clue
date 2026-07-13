@@ -32,10 +32,13 @@ function cloneGridDeep(grid: Grid): Grid {
 // ── Chart constructors (pure) ──────────────────────────────────────
 
 export function blankChart(cards: Card[], playerIds: string[]): Chart {
+  const handSizes: Record<string, number> = {}
+  for (const pid of playerIds) handSizes[pid] = 0
   return {
     grid: makeGrid(cards, playerIds),
     groups: {},
-    nextGroupNumber: 1
+    nextGroupNumber: 1,
+    handSizes
   }
 }
 
@@ -43,7 +46,8 @@ export function cloneChart(chart: Chart): Chart {
   return {
     grid: cloneGridDeep(chart.grid),
     groups: { ...chart.groups },
-    nextGroupNumber: chart.nextGroupNumber
+    nextGroupNumber: chart.nextGroupNumber,
+    handSizes: { ...chart.handSizes }
   }
 }
 
@@ -136,7 +140,7 @@ function resolveNotes(grid: Grid, groups: Record<number, SuggestionGroup>): bool
 }
 
 /** Run deduction rules to a fixed point. Mutates the passed-in grid. */
-function fixedPoint(grid: Grid, players: string[], groups: Record<number, SuggestionGroup>): void {
+function fixedPoint(grid: Grid, players: string[], groups: Record<number, SuggestionGroup>, handSizes: Record<string, number>): void {
   let changed = true
   while (changed) {
     changed = false
@@ -146,7 +150,50 @@ function fixedPoint(grid: Grid, players: string[], groups: Record<number, Sugges
       }
     }
     if (resolveNotes(grid, groups)) changed = true
+    if (propagateHandSizes(grid, players, handSizes)) changed = true
   }
+}
+
+/**
+ * Count-based deduction using hand sizes.
+ *
+ * For each player whose hand size is known (> 0):
+ * - If ticks == hand size, every remaining non-cross cell must be a cross.
+ * - Count non-crossed cells; if that equals (hand size - ticks), each is a tick.
+ *
+ * Must run at fixed point alongside the other rules.
+ */
+function propagateHandSizes(grid: Grid, players: string[], handSizes: Record<string, number>): boolean {
+  let changed = false
+  for (const pid of players) {
+    const size = handSizes[pid]
+    if (!size || size <= 0) continue
+
+    let ticks = 0
+    let nonCross: { cardId: string }[] = []
+    for (const cardId of Object.keys(grid)) {
+      const cell = grid[cardId][pid]
+      if (cell.kind === 'tick') ticks++
+      else if (cell.kind !== 'cross') nonCross.push({ cardId })
+    }
+
+    // All slots filled — remaining non-cross cells are crosses
+    if (ticks >= size && nonCross.length > 0) {
+      for (const { cardId } of nonCross) {
+        if (set(grid, cardId, pid, { kind: 'cross' })) changed = true
+      }
+      continue
+    }
+
+    // Remaining unknown slots exactly match remaining non-cross cells → all ticks
+    const remaining = size - ticks
+    if (remaining > 0 && nonCross.length === remaining) {
+      for (const { cardId } of nonCross) {
+        if (set(grid, cardId, pid, { kind: 'tick' })) changed = true
+      }
+    }
+  }
+  return changed
 }
 
 // ── Pure propagation ────────────────────────────────────────────────
@@ -159,7 +206,7 @@ function fixedPoint(grid: Grid, players: string[], groups: Record<number, Sugges
 export function propagate(chart: Chart): Chart {
   const next = cloneChart(chart)
   const players = playerIdsOf(next.grid)
-  fixedPoint(next.grid, players, next.groups)
+  fixedPoint(next.grid, players, next.groups, next.handSizes)
   return next
 }
 
@@ -181,7 +228,7 @@ export function foldEvent(chart: Chart, event: GameEvent, playerIds: string[]): 
     foldManual(next, event, playerIds)
   }
 
-  fixedPoint(next.grid, playerIds, next.groups)
+  fixedPoint(next.grid, playerIds, next.groups, next.handSizes)
   return next
 }
 
@@ -248,6 +295,7 @@ function foldManual(chart: Chart, event: ManualEvent, playerIds: string[]): void
 export function applyHand(chart: Chart, cards: Card[], meId: string, hand: string[]): Chart {
   if (hand.length === 0) return cloneChart(chart)
   const next = cloneChart(chart)
+  next.handSizes[meId] = hand.length
   const handSet = new Set(hand)
   const playerIds = playerIdsOf(next.grid)
   for (const card of cards) {
@@ -260,7 +308,7 @@ export function applyHand(chart: Chart, cards: Card[], meId: string, hand: strin
       set(next.grid, card.id, meId, { kind: 'cross' })
     }
   }
-  fixedPoint(next.grid, playerIds, next.groups)
+  fixedPoint(next.grid, playerIds, next.groups, next.handSizes)
   return next
 }
 
@@ -274,6 +322,11 @@ export function buildChart(
 ): Chart {
   const playerIds = players.map((p) => p.id)
   let chart = blankChart(cards, playerIds)
+
+  // Record hand sizes for all players with known hands
+  for (const p of players) {
+    if (p.hand.length > 0) chart.handSizes[p.id] = p.hand.length
+  }
 
   const me = players.find((p) => p.isMe)
   if (me && me.hand.length) {

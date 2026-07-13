@@ -65,6 +65,8 @@ export interface Chart {
   grid: Grid
   groups: Record<number, SuggestionGroup>
   nextGroupNumber: number
+  /** Cards dealt to each player — used by count-based deduction. */
+  handSizes: Record<string, number>
 }
 
 /** Fixed setup data — doesn't change during play. */
