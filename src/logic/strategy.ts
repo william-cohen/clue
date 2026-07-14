@@ -3,7 +3,7 @@ import { byCategory } from './cards'
 import { foldEvent } from './engine'
 import type { SuggestionEvent } from './events'
 import { makeEventId } from './events'
-import { buildProbabilities, type ProbMap } from './bayes'
+import { buildProbabilities, buildPriors, type ProbMap } from './bayes'
 
 /** Combined view of setup + chart + event log for the strategy engine. */
 export interface StrategyState {
@@ -51,17 +51,70 @@ function possibleHolders(grid: Grid, cardId: string, playerIds: string[], observ
   return holders
 }
 
-/** Entropy (in bits) of a single card from observer's perspective. */
-function cardEntropy(grid: Grid, cardId: string, playerIds: string[], observerHand: string[]): number {
-  const holders = possibleHolders(grid, cardId, playerIds, observerHand)
-  if (holders.length <= 1) return 0
-  return Math.log2(holders.length)
+/**
+ * Shannon entropy (in bits) of a single card from an observer's perspective,
+ * using the Bayesian probability map for a non-uniform distribution.
+ *
+ * Build a distribution: p[player] = ProbMap[cardId][player] for each non-crossed
+ * player, plus p[envelope] = 1 - sum(p[players]). Normalize, then compute -Σ p log2 p.
+ *
+ * Falls back to uniform (log2) if probs are not available.
+ */
+export function cardEntropyBayes(
+  grid: Grid,
+  probs: ProbMap,
+  cardId: string,
+  playerIds: string[],
+  observerHand: string[]
+): number {
+  // Observer knows their own cards
+  if (observerHand.includes(cardId)) return 0
+
+  // If ticked for some player, entropy is 0 (known holder)
+  const ticked = playerIds.find((pid) => grid[cardId][pid].kind === 'tick')
+  if (ticked) return 0
+
+  // Non-crossed players are the candidates
+  const candidates = playerIds.filter((pid) => grid[cardId][pid].kind !== 'cross')
+  if (candidates.length === 0) return 0 // in envelope, solved
+
+  // Build distribution from ProbMap
+  const row = probs[cardId]
+  const dist: number[] = []
+  let sum = 0
+  for (const pid of candidates) {
+    const p = row?.[pid] ?? 0
+    dist.push(p)
+    sum += p
+  }
+  // Envelope slot: 1 - sum(player probs). Only if no one is ticked.
+  const envelopeP = Math.max(0, 1 - sum)
+  dist.push(envelopeP)
+  sum += envelopeP
+
+  if (sum <= 0) return 0
+
+  // Normalize and compute Shannon entropy
+  let h = 0
+  for (const p of dist) {
+    if (p > 0) {
+      const pn = p / sum
+      h -= pn * Math.log2(pn)
+    }
+  }
+  return h
 }
 
-/** Total entropy across all unsolved cards from a perspective. */
-function totalEntropy(grid: Grid, cards: Card[], playerIds: string[], observerHand: string[]): number {
+/** Total Shannon entropy across all cards from an observer's perspective. */
+export function totalEntropyBayes(
+  grid: Grid,
+  probs: ProbMap,
+  cards: Card[],
+  playerIds: string[],
+  observerHand: string[]
+): number {
   let h = 0
-  for (const c of cards) h += cardEntropy(grid, c.id, playerIds, observerHand)
+  for (const c of cards) h += cardEntropyBayes(grid, probs, c.id, playerIds, observerHand)
   return h
 }
 
@@ -145,10 +198,30 @@ function simEvent(
   }
 }
 
+/** Result of simulating one outcome: entropy + how many new ticks it produced. */
+interface SimResult {
+  entropy: number
+  newTicks: number
+}
+
+/** Count ticks in a grid for a set of (cardId, playerId) pairs we care about. */
+function countTicks(grid: Grid, cardIds: string[], playerIds: string[]): number {
+  let n = 0
+  for (const cid of cardIds) {
+    for (const pid of playerIds) {
+      if (grid[cid][pid].kind === 'tick') n++
+    }
+  }
+  return n
+}
+
 /**
  * Simulate an outcome's effect on entropy from a given observer's perspective.
  * Uses the pure engine's foldEvent to propagate consequences — no direct grid
  * mutation. Pure with respect to the input chart.
+ *
+ * Returns the observer's entropy after the outcome and the number of new ticks
+ * the outcome produces (for resolveProb computation).
  */
 function entropyAfter(
   chart: Chart,
@@ -157,18 +230,21 @@ function entropyAfter(
   observerHand: string[],
   suggestionCardIds: string[],
   outcome: Outcome,
-  observerIsAsker: boolean
-): number {
+  observerIsAsker: boolean,
+  askerId: string
+): SimResult {
+  const ticksBefore = countTicks(chart.grid, suggestionCardIds, playerIds)
+
   if (outcome.showerId === null) {
     // All passed → every non-asker responder is crossed on all 3 cards.
-    // The asker is whoever the observer is (if observerIsAsker) or a placeholder;
-    // either way foldEvent crosses all passers on the suggested cards.
-    const askerId = observerIsAsker ? observerHand[0] : '__sim__'
     const responses = playerIds
       .filter((p) => p !== askerId)
       .map((p) => ({ responderId: p, passed: true }))
     const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
-    return totalEntropy(simChart.grid, cards, playerIds, observerHand)
+    const simProbs = buildPriors(simChart, cards, playerIds)
+    const entropy = totalEntropyBayes(simChart.grid, simProbs, cards, playerIds, observerHand)
+    const newTicks = countTicks(simChart.grid, suggestionCardIds, playerIds) - ticksBefore
+    return { entropy, newTicks }
   }
 
   // Someone showed.
@@ -177,61 +253,69 @@ function entropyAfter(
 
   if (observerIsAsker) {
     // The asker SEES the actual card. Model which card was most likely shown.
-    const askerId = observerHand[0]
     if (observerHolds.length === 2) {
       // Shower must have the 3rd card — we see it.
       const third = suggestionCardIds.find((cid) => !observerHolds.includes(cid))!
-      const responses = [
-        { responderId: shower, passed: false, shownCardId: third }
-      ]
+      const responses = [{ responderId: shower, passed: false, shownCardId: third }]
       const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
-      return totalEntropy(simChart.grid, cards, playerIds, observerHand)
+      const simProbs = buildPriors(simChart, cards, playerIds)
+      const entropy = totalEntropyBayes(simChart.grid, simProbs, cards, playerIds, observerHand)
+      const newTicks = countTicks(simChart.grid, suggestionCardIds, playerIds) - ticksBefore
+      return { entropy, newTicks }
     } else if (observerHolds.length === 1) {
       // Shower has one of the 2 non-observer cards — we don't know which. Average.
       const candidates = suggestionCardIds.filter((cid) => !observerHolds.includes(cid))
       let avgH = 0
+      let avgNewTicks = 0
       for (const shown of candidates) {
         const responses = [{ responderId: shower, passed: false, shownCardId: shown }]
         const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
-        avgH += totalEntropy(simChart.grid, cards, playerIds, observerHand)
+        const simProbs = buildPriors(simChart, cards, playerIds)
+        avgH += totalEntropyBayes(simChart.grid, simProbs, cards, playerIds, observerHand)
+        avgNewTicks += countTicks(simChart.grid, suggestionCardIds, playerIds) - ticksBefore
       }
-      return avgH / candidates.length
+      return { entropy: avgH / candidates.length, newTicks: avgNewTicks / candidates.length }
     } else {
-      // Observer holds 0. Shower showed one of 3 — average weighted by likelihood.
+      // Observer holds 0. Shower showed one of 3 — weighted average by Bayesian prob.
       const candidates = suggestionCardIds.filter((cid) => {
         const cell = chart.grid[cid][shower]
         return cell.kind !== 'cross' && cell.kind !== 'tick'
       })
       if (candidates.length === 0) {
-        // Contradiction — shower shouldn't have been able to show. Return current entropy.
-        return totalEntropy(chart.grid, cards, playerIds, observerHand)
+        // Contradiction — shower shouldn't have been able to show.
+        const curProbs = buildPriors(chart, cards, playerIds)
+        const entropy = totalEntropyBayes(chart.grid, curProbs, cards, playerIds, observerHand)
+        return { entropy, newTicks: 0 }
       }
-      const weights = candidates.map((cid) => {
-        const holders = possibleHolders(chart.grid, cid, playerIds, observerHand)
-        return holders.length > 0 ? 1 / holders.length : 1
-      })
+      // Weight by P(shower holds this card) from the current probs
+      const curProbs = buildPriors(chart, cards, playerIds)
+      const weights = candidates.map((cid) => curProbs[cid]?.[shower] ?? 0)
       const wSum = weights.reduce((s, w) => s + w, 0)
       let avgH = 0
+      let avgNewTicks = 0
       for (let i = 0; i < candidates.length; i++) {
         const responses = [{ responderId: shower, passed: false, shownCardId: candidates[i] }]
         const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
-        avgH += (weights[i] / wSum) * totalEntropy(simChart.grid, cards, playerIds, observerHand)
+        const simProbs = buildPriors(simChart, cards, playerIds)
+        const w = wSum > 0 ? weights[i] / wSum : 1 / candidates.length
+        avgH += w * totalEntropyBayes(simChart.grid, simProbs, cards, playerIds, observerHand)
+        avgNewTicks += w * (countTicks(simChart.grid, suggestionCardIds, playerIds) - ticksBefore)
       }
-      return avgH
+      return { entropy: avgH, newTicks: avgNewTicks }
     }
   } else {
     // Observer is NOT the asker (an opponent watching).
     // They only know: passers don't have any of the 3; the shower has at least one,
     // but they DON'T see which card (shownCardId: null) → foldEvent creates a note group.
-    const askerId = '__sim__'
     const responses: { responderId: string; passed: boolean; shownCardId?: string | null }[] = playerIds
       .filter((p) => p !== askerId && p !== shower)
       .map((p) => ({ responderId: p, passed: true }))
     responses.push({ responderId: shower, passed: false, shownCardId: null })
-    // foldEvent processes passers first, then the shower — order in responses
-    // matters only for "first shower ends it"; here the shower is last which is fine.
     const simChart = foldEvent(chart, simEvent(askerId, suggestionCardIds, responses), playerIds)
-    return totalEntropy(simChart.grid, cards, playerIds, observerHand)
+    const simProbs = buildPriors(simChart, cards, playerIds)
+    const entropy = totalEntropyBayes(simChart.grid, simProbs, cards, playerIds, observerHand)
+    const newTicks = countTicks(simChart.grid, suggestionCardIds, playerIds) - ticksBefore
+    return { entropy, newTicks }
   }
 }
 
@@ -251,17 +335,6 @@ function scoreSuggestion(
 
   const suggestionCardIds = [suggestion.suspect, suggestion.weapon, suggestion.room]
 
-  // Entropy before, from our perspective
-  const ourEntropyBefore = totalEntropy(grid, cards, playerIds, meHand)
-
-  // Opponents' entropy before
-  const opponents = state.setup.players.filter((p) => p.id !== meId)
-  const oppEntropyBefore: Record<string, number> = {}
-  for (const opp of opponents) {
-    // Opponent knows their own hand
-    oppEntropyBefore[opp.id] = totalEntropy(grid, cards, playerIds, opp.hand)
-  }
-
   // Bayesian probability map — sharper than the grid alone for outcome prediction
   const probs = buildProbabilities(
     state.events,
@@ -269,6 +342,17 @@ function scoreSuggestion(
     playerIds,
     state.chart
   )
+
+  // Entropy before, from our perspective (Shannon, using ProbMap)
+  const ourEntropyBefore = totalEntropyBayes(grid, probs, cards, playerIds, meHand)
+
+  // Opponents' entropy before
+  const opponents = state.setup.players.filter((p) => p.id !== meId)
+  const oppEntropyBefore: Record<string, number> = {}
+  for (const opp of opponents) {
+    // Opponent knows their own hand
+    oppEntropyBefore[opp.id] = totalEntropyBayes(grid, probs, cards, playerIds, opp.hand)
+  }
 
   // Enumerate outcomes
   const outcomes = enumerateOutcomes(grid, probs, suggestionCardIds, responderOrder)
@@ -282,19 +366,19 @@ function scoreSuggestion(
   const outcomeDetails: { label: string; prob: number; ourGain: number }[] = []
 
   for (const o of outcomes) {
-    const hAfter = entropyAfter(state.chart, cards, playerIds, meHand, suggestionCardIds, o, true)
-    ourEntropyAfter += o.prob * hAfter
+    const sim = entropyAfter(state.chart, cards, playerIds, meHand, suggestionCardIds, o, true, meId)
+    ourEntropyAfter += o.prob * sim.entropy
 
     for (const opp of opponents) {
-      const oppHAfter = entropyAfter(state.chart, cards, playerIds, opp.hand, suggestionCardIds, o, false)
-      opponentEntropyAfter[opp.id] += o.prob * oppHAfter
+      const oppSim = entropyAfter(state.chart, cards, playerIds, opp.hand, suggestionCardIds, o, false, meId)
+      opponentEntropyAfter[opp.id] += o.prob * oppSim.entropy
     }
 
-    // Probability of a definitive resolution (we learn exactly which card)
-    if (o.showerId) {
-      const observerHolds = suggestionCardIds.filter((cid) => meHand.includes(cid))
-      if (observerHolds.length === 2) resolveProb += o.prob // we'll learn the 3rd definitively
-      else if (observerHolds.length === 1) resolveProb += o.prob * 0.5
+    // Probability of a definitive resolution: how many new ticks did this outcome produce?
+    // newTicks is averaged over card-uncertainty when the asker doesn't see the card.
+    // resolveProb = P(at least one definitive tick from this outcome)
+    if (o.showerId && sim.newTicks > 0) {
+      resolveProb += o.prob * Math.min(1, sim.newTicks)
     }
 
     const label = o.showerId
@@ -303,7 +387,7 @@ function scoreSuggestion(
     outcomeDetails.push({
       label,
       prob: o.prob,
-      ourGain: ourEntropyBefore - hAfter
+      ourGain: ourEntropyBefore - sim.entropy
     })
   }
 
